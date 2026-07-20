@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, Query
-from app.models.video import VideoIdRequest, StreamResponse, HealthResponse
+from fastapi import APIRouter, Query
+from app.models.video import StreamResponse, HealthResponse
 from app.services.video_service import video_service
 from app.core.config import get_settings
 import yt_dlp
@@ -19,18 +19,28 @@ async def get_stream(
     )
 
 
+@router.get("/embed")
+async def get_embed(
+    video_id: str = Query(..., description="YouTube Video ID", min_length=11, max_length=11)
+):
+    return video_service.get_embed_info(video_id)
+
+
 @router.get("/info")
 async def get_video_info(
     video_id: str = Query(..., description="YouTube Video ID", min_length=11, max_length=11)
 ):
-    result = video_service.get_stream_url(video_id)
-    return {
-        "video_id": result["video_id"],
-        "title": result.get("title"),
-        "duration": result.get("duration"),
-        "resolution": result.get("resolution"),
-        "url": result["url"]
-    }
+    try:
+        result = video_service.get_stream_url(video_id)
+        return {
+            "video_id": result["video_id"],
+            "title": result.get("title"),
+            "duration": result.get("duration"),
+            "resolution": result.get("resolution"),
+            "url": result["url"]
+        }
+    except Exception:
+        return video_service.get_embed_info(video_id)
 
 
 @router.get("/formats")

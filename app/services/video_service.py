@@ -11,48 +11,13 @@ from app.core.exceptions import (
 from app.utils.logger import logger
 
 
-YDL_EXTRACTORS = [
-    {
-        'name': 'android',
-        'opts': {
-            'format': 'best[height<=720]/best',
-            'extractor_args': {'youtube': {'player_client': ['android']}},
-            'http_headers': {
-                'User-Agent': 'com.google.android.youtube/19.02.39 (Linux; U; Android 14) gzip',
-            },
-        }
-    },
-    {
-        'name': 'ios',
-        'opts': {
-            'format': 'best[height<=720]/best',
-            'extractor_args': {'youtube': {'player_client': ['ios']}},
-            'http_headers': {
-                'User-Agent': 'com.google.ios.youtube/19.02.36 (iPhone16,2; U; CPU iOS 17_4_1 like Mac OS X)',
-            },
-        }
-    },
-    {
-        'name': 'web',
-        'opts': {
-            'format': 'best[height<=720]/best',
-            'extractor_args': {'youtube': {'player_client': ['web']}},
-        }
-    },
-    {
-        'name': 'web_creator',
-        'opts': {
-            'format': 'best[height<=720]/best',
-            'extractor_args': {'youtube': {'player_client': ['web_creator']}},
-        }
-    },
-]
-
 BASE_OPTS = {
     'quiet': True,
     'no_warnings': True,
     'extract_flat': False,
     'socket_timeout': 30,
+    'no_check_certificates': True,
+    'ignoreerrors': True,
 }
 
 
@@ -65,8 +30,12 @@ class VideoService:
         pattern = r'^[a-zA-Z0-9_-]{11}$'
         return bool(re.match(pattern, video_id))
 
-    def _extract_with_extractor(self, url: str, extractor: dict) -> Optional[dict]:
-        ydl_opts = {**BASE_OPTS, **extractor['opts']}
+    def _try_extract(self, url: str, extractor_args: dict) -> Optional[dict]:
+        ydl_opts = {
+            **BASE_OPTS,
+            'format': 'best[height<=720]/best',
+            'extractor_args': extractor_args,
+        }
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -75,11 +44,12 @@ class VideoService:
                     return None
 
                 stream_url = info.get('url')
-
                 if not stream_url:
                     formats = info.get('formats', [])
-                    if formats:
-                        stream_url = formats[-1].get('url')
+                    for f in reversed(formats):
+                        if f.get('url'):
+                            stream_url = f['url']
+                            break
 
                 if not stream_url:
                     return None
@@ -92,24 +62,27 @@ class VideoService:
                     "resolution": f"{info.get('width', 0)}x{info.get('height', 0)}",
                 }
         except Exception as e:
-            logger.debug(f"Extractor '{extractor['name']}' failed: {e}")
+            logger.debug(f"Extract failed: {e}")
             return None
 
-    def _try_ffmpeg_extract(self, video_id: str) -> Optional[str]:
-        try:
-            url = f"https://youtu.be/{video_id}"
-            cmd = [
-                "yt-dlp",
-                "-f", "best[height<=720]/best",
-                "-g",
-                "--extractor-args", "youtube:player_client=android",
-                url
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-        except Exception as e:
-            logger.debug(f"ffmpeg fallback failed: {e}")
+    def _try_subprocess(self, video_id: str) -> Optional[str]:
+        clients = ['android', 'ios', 'web_creator', 'web']
+        for client in clients:
+            try:
+                cmd = [
+                    "yt-dlp",
+                    "-f", "best[height<=720]/best",
+                    "-g",
+                    "--no-check-certificates",
+                    "--extractor-args", f"youtube:player_client={client}",
+                    f"https://youtu.be/{video_id}"
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                if result.returncode == 0 and result.stdout.strip():
+                    logger.info(f"Subprocess success with client: {client}")
+                    return result.stdout.strip().split('\n')[0]
+            except Exception as e:
+                logger.debug(f"Subprocess {client} failed: {e}")
         return None
 
     def get_stream_url(self, video_id: str, format_spec: Optional[str] = None) -> dict:
@@ -118,15 +91,21 @@ class VideoService:
 
         url = f"https://youtu.be/{video_id}"
 
-        for extractor in YDL_EXTRACTORS:
-            logger.info(f"Trying extractor: {extractor['name']}")
-            result = self._extract_with_extractor(url, extractor)
+        clients = [
+            {'youtube': {'player_client': ['android']}},
+            {'youtube': {'player_client': ['ios']}},
+            {'youtube': {'player_client': ['web_creator']}},
+            {'youtube': {'player_client': ['web']}},
+            {'youtube': {'player_client': ['mweb']}},
+        ]
+
+        for extractor_args in clients:
+            result = self._try_extract(url, extractor_args)
             if result:
                 result['video_id'] = video_id
                 return result
 
-        logger.info("All extractors failed, trying subprocess fallback...")
-        fallback_url = self._try_ffmpeg_extract(video_id)
+        fallback_url = self._try_subprocess(video_id)
         if fallback_url:
             return {
                 "url": fallback_url,
@@ -138,6 +117,18 @@ class VideoService:
             }
 
         raise StreamExtractionError(video_id, "All extraction methods failed")
+
+    def get_embed_info(self, video_id: str) -> dict:
+        if not self.validate_video_id(video_id):
+            raise InvalidVideoIdException(video_id)
+
+        return {
+            "video_id": video_id,
+            "embed_url": f"https://www.youtube.com/embed/{video_id}",
+            "watch_url": f"https://www.youtube.com/watch?v={video_id}",
+            "thumbnail_url": f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
+            "oembed_url": f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json",
+        }
 
     def get_available_formats(self, video_id: str) -> list:
         if not self.validate_video_id(video_id):
