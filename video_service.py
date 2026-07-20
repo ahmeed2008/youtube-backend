@@ -12,6 +12,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# video_service.py
 @app.get("/get-stream")
 async def get_stream(video_id: str):
     try:
@@ -22,26 +23,25 @@ async def get_stream(video_id: str):
             f"https://youtu.be/{video_id}"
         ]
         
-        # Asenkron çalıştırarak timeout'u doğru yönetiyoruz
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+        # Timeout'u 90 saniyeye çıkardık
+        result = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            timeout=90
         )
         
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=90)
-        except asyncio.TimeoutError:
-            proc.kill()
-            raise HTTPException(status_code=504, detail="Sunucu yanıt süresi aşıldı. Lütfen tekrar deneyin.")
-
-        if proc.returncode != 0:
-            error_msg = stderr.decode().strip()
-            print(f"YT-DLP ERROR: {error_msg}")
-            raise HTTPException(status_code=400, detail=error_msg)
+        if result.returncode != 0:
+            # Hata detayını HTTP response body'sine yazıyoruz
+            print(f"yt-dlp ERROR: {result.stderr}") 
+            raise HTTPException(status_code=400, detail=result.stderr)
             
-        return {"url": stdout.decode().strip()}
+        return {"url": result.stdout.strip()}
 
+    except subprocess.TimeoutExpired:
+        print("TIMEOUT: yt-dlp 90 saniyede cevap vermedi")
+        raise HTTPException(status_code=504, detail="Sunucu yanıt süresi aşıldı. Lütfen tekrar deneyin.")
+        
     except Exception as e:
-        print(f"CRITICAL ERROR: {str(e)}")
+        print(f"UNEXPECTED ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
